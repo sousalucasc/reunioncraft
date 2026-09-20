@@ -71,8 +71,12 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\programming\GLFW\glfw-3.5.1\include;$(IncludePath)</IncludePath>
+    <IncludePath>E:\programming\STB;E:\programming\GLM\glm;E:\programming\GLFW\glfw-3.5.1\include;$(IncludePath)</IncludePath>
     <LibraryPath>E:\programming\GLFW\glfw-3.5.1\build\src\Debug;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>E:\programming\STB;E:\programming\GLM\glm;E:\programming\GLFW\glfw-3.5.1\include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\programming\GLFW\glfw-3.5.1\build\src\Release;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -125,11 +129,40 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="glad.c" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Shader.cpp" />
+    <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="Texture.cpp" />
+    <ClCompile Include="Block.cpp" />
+    <ClCompile Include="Chunk.cpp" />
+    <ClCompile Include="ChunkMesher.cpp" />
+    <ClCompile Include="World.cpp" />
+    <ClCompile Include="Noise.cpp" />
+    <ClCompile Include="TerrainGenerator.cpp" />
+    <ClCompile Include="Raycast.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Shader.h" />
+    <ClInclude Include="Camera.h" />
+    <ClInclude Include="Texture.h" />
+    <ClInclude Include="Block.h" />
+    <ClInclude Include="Chunk.h" />
+    <ClInclude Include="ChunkMesher.h" />
+    <ClInclude Include="World.h" />
+    <ClInclude Include="Noise.h" />
+    <ClInclude Include="TerrainGenerator.h" />
+    <ClInclude Include="Raycast.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\basic.vert" />
+    <None Include="shaders\basic.frag" />
+    <None Include="shaders\line.vert" />
+    <None Include="shaders\line.frag" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
