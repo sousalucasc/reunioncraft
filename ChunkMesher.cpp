@@ -371,6 +371,7 @@ void buildChunkMesh(const ChunkSnapshot& snap, MeshData& out)
 }
 
 ChunkMesh::ChunkMesh()
+    : highestBlock(-1)
 {
     solid.VAO = 0; solid.VBO = 0; solid.EBO = 0; solid.indexCount = 0; solid.created = false;
     water.VAO = 0; water.VBO = 0; water.EBO = 0; water.indexCount = 0; water.created = false;

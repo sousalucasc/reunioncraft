@@ -51,6 +51,22 @@ const float REACH = 6.0f;
 //de nada. Com 0 aparece tearing, mas o numero passa a significar algo.
 const int VSYNC = 0;
 
+//Amostras por pixel do MSAA. 0 ou 1 desliga.
+//
+//Antialiasa BORDA DE GEOMETRIA: a silhueta do bloco contra o ceu e contra o
+//terreno de tras. NAO mexe em textura, porque o fragment shader roda uma vez
+//por pixel independente da contagem de amostras. O chiado do terreno distante
+//vem de minificacao do atlas sem mipmap e continua exatamente igual.
+//
+//Tambem nao pega borda de folha e de vidro: la o recorte e um discard binario,
+//entao ou a amostra existe ou nao existe, sem meio termo pra suavizar.
+const int MSAA_SAMPLES = 4;
+
+//Sombra liga/desliga no L. Serve pra ver o custo real do sistema, e pra
+//quem roda em maquina fraca: e o unico efeito aqui que custa caro.
+bool shadowsEnabled = true;
+bool shadowKeyWasDown = false;
+
 //Wireframe liga/desliga no F. Serve pra conferir que face interna nao existe.
 bool wireframe = false;
 bool wireKeyWasDown = false;
@@ -82,9 +98,9 @@ float dayTime = 0.30f;
 //Estatistica do ultimo frame, so pra linha de status.
 int drawnChunks = 0;
 int totalChunks = 0;
-//Draws gastos so pra encher os mapas de sombra. Somados os das cascatas que
-//foram refeitas neste frame.
-int shadowDraws = 0;
+//Draws gastos so pra encher os mapas de sombra, separados por cascata. Zero
+//numa cascata significa que ela nao foi refeita neste frame.
+int shadowDraws[SHADOW_CASCADES] = { 0, 0, 0 };
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -126,6 +142,11 @@ void processInput(GLFWwindow* window, float deltaTime, const World& world, Playe
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
     }
     wireKeyWasDown = wireKeyDown;
+
+    bool shadowKeyDown = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
+    if (shadowKeyDown && !shadowKeyWasDown)
+        shadowsEnabled = !shadowsEnabled;
+    shadowKeyWasDown = shadowKeyDown;
 
     //T adianta o relogio em 1/8 de dia, pra nao esperar o ciclo inteiro.
     bool timeKeyDown = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
@@ -273,6 +294,11 @@ GLFWwindow* initWindow(int width, int height, const char* title)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    //Tem que vir ANTES de criar a janela: e uma propriedade do framebuffer
+    //padrao, que nasce junto com o contexto e nao da pra trocar depois.
+    if (MSAA_SAMPLES > 1)
+        glfwWindowHint(GLFW_SAMPLES, MSAA_SAMPLES);
     //glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
     GLFWwindow* window = glfwCreateWindow(width, height, title, NULL, NULL);
@@ -294,6 +320,18 @@ GLFWwindow* initWindow(int width, int height, const char* title)
 
     glViewport(0, 0, width, height);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    if (MSAA_SAMPLES > 1)
+    {
+        //Ja nasce ligado pelo padrao do OpenGL, mas explicito e melhor do que
+        //depender disso.
+        glEnable(GL_MULTISAMPLE);
+
+        //O driver pode nao dar o que foi pedido. Melhor saber do que supor.
+        int obtidas = 0;
+        glGetIntegerv(GL_SAMPLES, &obtidas);
+        std::cout << "MSAA: " << obtidas << "x (pedido " << MSAA_SAMPLES << "x)" << std::endl;
+    }
 
     //Esconde e prende o cursor na janela, estilo FPS.
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -336,10 +374,18 @@ int collectResults(World& world, MeshMap& meshes, ChunkWorkers& workers,
         meshInFlight.erase(mesh.pos);
 
         //Pode ter sido descarregado enquanto o worker trabalhava.
-        if (world.getChunk(mesh.pos) == NULL)
+        const Chunk* chunk = world.getChunk(mesh.pos);
+        if (chunk == NULL)
             continue;
 
-        meshes[mesh.pos].upload(mesh.data);
+        ChunkMesh& m = meshes[mesh.pos];
+        m.upload(mesh.data);
+
+        //A altura vai junto. E o unico dado do Chunk de que os passes de
+        //desenho precisam, e guardar aqui poupa uma busca no mapa por chunk
+        //por passe.
+        m.highestBlock = chunk->highestBlock;
+
         uploaded++;
     }
 
@@ -543,10 +589,10 @@ void renderShadows(ShadowMap& shadows, const Shader& depthShader, const Texture&
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(2.0f, 4.0f);
 
-    shadowDraws = 0;
-
     for (int c = 0; c < SHADOW_CASCADES; c++)
     {
+        shadowDraws[c] = 0;
+
         if (!shadows.refreshing(c))
             continue;
 
@@ -562,12 +608,8 @@ void renderShadows(ShadowMap& shadows, const Shader& depthShader, const Texture&
 
         for (MeshMap::const_iterator it = meshes.begin(); it != meshes.end(); ++it)
         {
-            const Chunk* chunk = world.getChunk(it->first);
-            if (chunk == NULL)
-                continue;
-
             glm::vec3 mn((float)(it->first.x * CHUNK_SIZE), 0.0f, (float)(it->first.z * CHUNK_SIZE));
-            glm::vec3 mx(mn.x + (float)CHUNK_SIZE, (float)(chunk->highestBlock + 1), mn.z + (float)CHUNK_SIZE);
+            glm::vec3 mx(mn.x + (float)CHUNK_SIZE, (float)(it->second.highestBlock + 1), mn.z + (float)CHUNK_SIZE);
 
             if (!aabbVisible(lightFrustum, mn, mx))
                 continue;
@@ -577,7 +619,7 @@ void renderShadows(ShadowMap& shadows, const Shader& depthShader, const Texture&
             //So o solido. Agua nao projeta sombra, e mandar ela aqui
             //escureceria o proprio fundo do lago.
             it->second.drawSolid();
-            shadowDraws++;
+            shadowDraws[c]++;
         }
     }
 
@@ -670,15 +712,13 @@ void render(const Shader& shader, const Shader& lineShader, const Shader& skySha
     //no shader basta e nao importa a ordem de desenho.
     for (MeshMap::const_iterator it = meshes.begin(); it != meshes.end(); ++it)
     {
-        const Chunk* chunk = world.getChunk(it->first);
-        if (chunk == NULL)
-            continue;
-
         //Caixa do chunk. A altura vai so ate o bloco mais alto dele: usar os
         //256 niveis inteiros deixaria a caixa tao alta que quase nada seria
         //cortado, porque uma caixa alta cruza o frustum de qualquer angulo.
+        //A altura vem da propria mesh; o evictMeshes ja garante que nao
+        //sobra mesh de chunk descarregado.
         glm::vec3 mn((float)(it->first.x * CHUNK_SIZE), 0.0f, (float)(it->first.z * CHUNK_SIZE));
-        glm::vec3 mx(mn.x + (float)CHUNK_SIZE, (float)(chunk->highestBlock + 1), mn.z + (float)CHUNK_SIZE);
+        glm::vec3 mx(mn.x + (float)CHUNK_SIZE, (float)(it->second.highestBlock + 1), mn.z + (float)CHUNK_SIZE);
 
         if (!aabbVisible(frustum, mn, mx))
             continue;
@@ -897,7 +937,7 @@ int main()
     std::cout << "carga inicial: " << world.chunkCount() << " chunks em "
         << (int)(fillTime * 1000.0) << " ms | raio " << RENDER_DISTANCE
         << " chunks (" << RENDER_DISTANCE * CHUNK_SIZE << " blocos)" << std::endl;
-    std::cout << "WASD anda, espaco pula, V voo, T hora | esq quebra, dir coloca | 1-9 bloco | F wireframe" << std::endl;
+    std::cout << "WASD anda, espaco pula, V voo, T hora | esq quebra, dir coloca | 1-9 bloco | F wireframe, L sombra" << std::endl;
 
     //O sampler le da unidade 0. Precisa ser setado uma vez, com o shader ativo.
     basicShader.use();
@@ -972,7 +1012,7 @@ int main()
                 << " | vy " << (int)player.velocity.y
                 << " | chunk (" << center.x << ", " << center.z << ")"
                 << " | chunks " << drawnChunks << "/" << totalChunks
-                << " | sombra " << shadowDraws
+                << " | sombra " << shadowDraws[0] << "/" << shadowDraws[1] << "/" << shadowDraws[2]
                 << " | fila " << workers.pending()
                 << " | disco " << ChunkStorage::chunksLoaded() << "R/" << ChunkStorage::chunksSaved() << "W";
             if (hit.hit)
@@ -1005,11 +1045,18 @@ int main()
 
             //As sombras vem ANTES do passe de cor: ele precisa dos mapas
             //prontos pra consultar.
-            if (shadowsOk)
+            if (shadowsOk && shadowsEnabled)
+            {
                 renderShadows(shadows, depthShader, atlas, world, meshes, sky,
                     camera.getView(), aspect, fbWidth, fbHeight);
+            }
+            else
+            {
+                for (int c = 0; c < SHADOW_CASCADES; c++)
+                    shadowDraws[c] = 0;
+            }
 
-            render(basicShader, lineShader, skyShader, atlas, world, meshes, wireVAO, quadVAO, hit, sky, FOG_END, aspect, shadows, shadowsOk);
+            render(basicShader, lineShader, skyShader, atlas, world, meshes, wireVAO, quadVAO, hit, sky, FOG_END, aspect, shadows, shadowsOk && shadowsEnabled);
 
             if (ui.ready())
                 drawUI(ui, atlas, player, world, workers, fbWidth, fbHeight, lastFps, dayTime, sky);

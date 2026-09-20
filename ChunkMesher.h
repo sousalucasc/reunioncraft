@@ -97,6 +97,12 @@ class ChunkMesh
 public:
     ChunkMesh();
 
+    //Altura do bloco mais alto do chunk. Guardada AQUI, e nao consultada no
+    //World na hora de desenhar: a caixa envolvente e precisa a cada chunk em
+    //cada passe, e com 2400 chunks e 4 passes isso era quase 10 mil buscas
+    //em tabela hash por frame so pra descobrir um inteiro que nao muda.
+    int highestBlock;
+
     //Substitui o conteudo dos buffers. Cria na primeira chamada.
     void upload(const MeshData& data);
 

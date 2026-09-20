@@ -15,10 +15,18 @@ static const float SHADOW_NEAR = 0.5f;
 //resolucao no fundo. 0.6 puxa pro lado bom das duas.
 static const float SPLIT_LAMBDA = 0.6f;
 
-//Quanto a luz recua alem da fatia, em blocos. Um bloco que projeta sombra
-//pode estar muito acima do que a camera enxerga: a montanha atras do morro
-//ainda escurece o vale. O terreno chega a 256, entao 300 cobre qualquer caso.
-static const float CASTER_MARGIN = 300.0f;
+//Quanto a luz recua ALEM do que a esfera ja cobre, em blocos.
+//
+//A caixa ja se estende um raio inteiro na direcao do sol por construcao, que
+//na ultima cascata passa de 140 blocos. Essa margem so importa pra primeira,
+//onde o raio e pequeno. O preco de exagerar e alto: a caixa e extrudada na
+//direcao do sol, e com o sol baixo isso vira um feixe quase horizontal que
+//varre meio mundo. Com 300 a ultima cascata desenhava 1150 chunks.
+//
+//O que se perde: um bloco mais de 64 blocos "sol acima" do que a cascata
+//cobre nao projeta nela. Na pratica isso so aconteceria com o sol rasante,
+//que e justamente quando a luz direta ja vale quase nada.
+static const float CASTER_MARGIN = 64.0f;
 
 //De quantos em quantos frames cada cascata e refeita. A de perto todo frame;
 //as de tras mudam devagar e podem esperar. As fases sao escolhidas pra que

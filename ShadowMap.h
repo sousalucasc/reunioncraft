@@ -17,7 +17,13 @@ constexpr int SHADOW_RES = 1024;
 
 //Ate onde a sombra alcanca, em blocos. Nao precisa acompanhar o render
 //distance: a partir daqui o fog ja comeu o terreno e ninguem repara.
-constexpr float SHADOW_DISTANCE = 160.0f;
+//
+//E DE LONGE o parametro mais caro do sistema, e nao e linear. A ultima
+//cascata tem que envolver a fatia mais distante do frustum, que e larga como
+//o plano de longe: dobrar o alcance dobra o raio da esfera, e a area coberta
+//(logo, o numero de chunks desenhados) quadruplica. De quebra, cada texel do
+//mapa passa a valer mais bloco, entao a sombra longe fica mais grossa.
+constexpr float SHADOW_DISTANCE = 96.0f;
 
 //Quanto a sombra chega a escurecer no maximo. 1.0 daria preto absoluto, que
 //nao existe na vida real: o ceu ilumina o que o sol nao alcanca.

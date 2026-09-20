@@ -9,7 +9,7 @@ static const float HALF_WIDTH = PLAYER_WIDTH * 0.5f;
 //num bloco e lido como dentro dele e fica preso.
 static const float EPS = 0.001f;
 
-static const float GRAVITY = -32.0f;
+static const float GRAVITY = -32.0f;// -32.0f;
 static const float JUMP_SPEED = 9.0f;
 static const float WALK_SPEED = 4.5f;
 static const float FLY_SPEED = 14.0f;
