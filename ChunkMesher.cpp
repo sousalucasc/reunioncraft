@@ -416,9 +416,10 @@ void ChunkMesh::drawBuffer(const Buffers& b)
     if (b.indexCount == 0)
         return;
 
+    //Nao desliga o VAO depois: quem desenha em seguida liga o proprio.
+    //Desligar a cada chunk dobrava as trocas de estado por frame a toa.
     glBindVertexArray(b.VAO);
     glDrawElements(GL_TRIANGLES, b.indexCount, GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
 }
 
 void ChunkMesh::drawSolid() const

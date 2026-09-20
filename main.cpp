@@ -537,6 +537,9 @@ void render(const Shader& shader, const Shader& lineShader, const Shader& skySha
     shader.setFloat("fogEnd", fogEnd);
     shader.setFloat("dayLight", sky.lightLevel);
 
+    //Consultado uma vez e reaproveitado nos ~700 draws do frame.
+    int originLoc = shader.uniformLocation("chunkOrigin");
+
     //O vertice guarda so a posicao local do chunk; o deslocamento pro mundo
     //vai como uniform, um por chunk, logo antes de cada draw call.
     shader.setMat4("view", view);
@@ -572,7 +575,7 @@ void render(const Shader& shader, const Shader& lineShader, const Shader& skySha
         if (!aabbVisible(frustum, mn, mx))
             continue;
 
-        shader.setVec3("chunkOrigin", mn);
+        shader.setVec3(originLoc, mn);
         it->second.drawSolid();
         drawnChunks++;
 
@@ -606,7 +609,7 @@ void render(const Shader& shader, const Shader& lineShader, const Shader& skySha
 
         for (size_t i = 0; i < waterQueue.size(); i++)
         {
-            shader.setVec3("chunkOrigin", waterQueue[i].origin);
+            shader.setVec3(originLoc, waterQueue[i].origin);
             waterQueue[i].mesh->drawWater();
         }
 
