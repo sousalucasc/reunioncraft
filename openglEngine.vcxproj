@@ -145,6 +145,8 @@
     <ClCompile Include="Noise.cpp" />
     <ClCompile Include="TerrainGenerator.cpp" />
     <ClCompile Include="Raycast.cpp" />
+    <ClCompile Include="Player.cpp" />
+    <ClCompile Include="Frustum.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Shader.h" />
@@ -157,6 +159,8 @@
     <ClInclude Include="Noise.h" />
     <ClInclude Include="TerrainGenerator.h" />
     <ClInclude Include="Raycast.h" />
+    <ClInclude Include="Player.h" />
+    <ClInclude Include="Frustum.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\basic.vert" />

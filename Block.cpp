@@ -7,6 +7,7 @@ static BlockInfo uniformBlock(int tile, bool solid = true, bool transparent = fa
     BlockInfo b;
     b.solid = solid;
     b.transparent = transparent;
+    b.translucent = false;
     for (int i = 0; i < 6; i++)
         b.tiles[i] = tile;
     b.tint = glm::vec3(1.0f);
@@ -49,6 +50,8 @@ static const BlockInfo* table()
         //Vidro e agua deixam ver atras: o vizinho continua desenhando a face.
         t[BLOCK_GLASS] = uniformBlock(TILE_GLASS, true, true);
         t[BLOCK_WATER] = uniformBlock(TILE_WATER, false, true);
+        //Unico bloco com alpha parcial no pack (170 a 223 de 255).
+        t[BLOCK_WATER].translucent = true;
 
         //Folha e solida mas transparente: da pra ver o tronco atras dela,
         //entao o vizinho continua desenhando a face virada pra ca.

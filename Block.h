@@ -39,6 +39,10 @@ struct BlockInfo
     bool solid;
     //Deixa ver o que esta atras, entao o vizinho ainda precisa desenhar a face.
     bool transparent;
+    //Alpha parcial: precisa de blending e de ser desenhado por ultimo, em
+    //ordem. Vidro e folha NAO entram aqui: o alpha deles e 0 ou 255, entao
+    //um discard no shader resolve, sem custo de ordenacao.
+    bool translucent;
     //Tile do atlas por face, na ordem do BlockFace.
     int tiles[6];
     //Multiplica a textura. Branco = textura original.

@@ -362,4 +362,6 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 *.md
-textures/atlas.png
+# Texturas derivadas do pack do Minecraft: nao redistribuir.
+# Gere as suas com tools/build_atlas.ps1
+textures/
