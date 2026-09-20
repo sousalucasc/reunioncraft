@@ -153,6 +153,7 @@
     <ClCompile Include="ChunkStorage.cpp" />
     <ClCompile Include="UIRenderer.cpp" />
     <ClCompile Include="Sky.cpp" />
+    <ClCompile Include="ShadowMap.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Shader.h" />
@@ -171,6 +172,7 @@
     <ClInclude Include="ChunkStorage.h" />
     <ClInclude Include="UIRenderer.h" />
     <ClInclude Include="Sky.h" />
+    <ClInclude Include="ShadowMap.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\basic.vert" />
@@ -181,6 +183,8 @@
     <None Include="shaders\ui.frag" />
     <None Include="shaders\sky.vert" />
     <None Include="shaders\sky.frag" />
+    <None Include="shaders\depth.vert" />
+    <None Include="shaders\depth.frag" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

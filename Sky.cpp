@@ -50,6 +50,15 @@ SkyState skyAt(float dayTime)
     s.zenith = DIA_ZENITE * dia + CREPUSCULO_ZENITE * crepusculo + NOITE_ZENITE * noite;
     s.horizon = DIA_HORIZONTE * dia + CREPUSCULO_HORIZONTE * crepusculo + NOITE_HORIZONTE * noite;
 
+    //O sol nasce no +X e se poe no -X. O desvio em Z existe de proposito:
+    //com o sol exatamente no plano XY os raios ficariam paralelos a duas das
+    //seis faces do bloco, e a sombra de uma parede cairia perfeitamente
+    //alinhada com a grade, que fica artificial num mundo de voxel.
+    s.sunDir = glm::normalize(glm::vec3(
+        std::sin(dayTime * TAU),
+        -std::cos(dayTime * TAU),
+        0.35f));
+
     //A luz acompanha o sol, mas parte de um piso em vez de zero.
     float brilho = smoothstep01(-0.15f, 0.30f, s.sunHeight);
     s.lightLevel = LUZ_NOTURNA + (1.0f - LUZ_NOTURNA) * brilho;

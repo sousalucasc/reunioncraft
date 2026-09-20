@@ -20,6 +20,10 @@ struct SkyState
 
     //-1 a 1. Negativo e noite. So pra diagnostico.
     float sunHeight;
+
+    //Direcao normalizada da camera PRO sol. E o que a sombra usa pra saber
+    //de onde a luz vem.
+    glm::vec3 sunDir;
 };
 
 //dayTime vai de 0 a 1: 0 e meia-noite, 0.25 amanhecer, 0.5 meio-dia.

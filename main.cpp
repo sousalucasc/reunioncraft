@@ -26,6 +26,7 @@
 #include "ChunkStorage.h"
 #include "UIRenderer.h"
 #include "Sky.h"
+#include "ShadowMap.h"
 
 //Globais porque os callbacks do GLFW sao funcoes livres e nao carregam contexto.
 Camera camera(glm::vec3(64.0f, 70.0f, 170.0f));
@@ -81,6 +82,9 @@ float dayTime = 0.30f;
 //Estatistica do ultimo frame, so pra linha de status.
 int drawnChunks = 0;
 int totalChunks = 0;
+//Draws gastos so pra encher os mapas de sombra. Somados os das cascatas que
+//foram refeitas neste frame.
+int shadowDraws = 0;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -514,10 +518,81 @@ void drawSelection(const Shader& lineShader, unsigned int wireVAO, const Raycast
 }
 
 //Desenha um frame.
+//Enche os mapas de profundidade das cascatas. Nao desenha nada na tela: o
+//resultado e consumido depois, pelo passe de cor.
+void renderShadows(ShadowMap& shadows, const Shader& depthShader, const Texture& texture,
+    const World& world, const MeshMap& meshes, const SkyState& sky,
+    const glm::mat4& view, float aspect, int screenW, int screenH)
+{
+    shadows.update(view, camera.fov, aspect, sky.sunDir);
+
+    depthShader.use();
+    texture.bind(0);
+
+    int originLoc = depthShader.uniformLocation("chunkOrigin");
+    int lightLoc = depthShader.uniformLocation("lightSpace");
+
+    //Um bloco que projeta sombra pode estar antes do plano de perto da luz.
+    //Com depth clamp ele e achatado no plano em vez de ser recortado fora,
+    //o que ainda produz a sombra certa e permite manter o volume apertado.
+    glEnable(GL_DEPTH_CLAMP);
+
+    //Empurra a profundidade gravada pra longe da luz, proporcional a
+    //inclinacao da face. E a primeira linha de defesa contra acne, antes
+    //mesmo do bias no passe de cor.
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);
+
+    shadowDraws = 0;
+
+    for (int c = 0; c < SHADOW_CASCADES; c++)
+    {
+        if (!shadows.refreshing(c))
+            continue;
+
+        shadows.beginCascade(c);
+
+        const glm::mat4& lightSpace = shadows.cascade(c).lightSpace;
+        depthShader.setMat4(lightLoc, lightSpace);
+
+        //Recorte contra o volume da luz, nao o da camera. E o que impede o
+        //passe de sombra de custar um draw por chunk carregado: a cascata de
+        //perto cobre poucos blocos, entao ve pouquissimos chunks.
+        Frustum lightFrustum = extractFrustum(lightSpace);
+
+        for (MeshMap::const_iterator it = meshes.begin(); it != meshes.end(); ++it)
+        {
+            const Chunk* chunk = world.getChunk(it->first);
+            if (chunk == NULL)
+                continue;
+
+            glm::vec3 mn((float)(it->first.x * CHUNK_SIZE), 0.0f, (float)(it->first.z * CHUNK_SIZE));
+            glm::vec3 mx(mn.x + (float)CHUNK_SIZE, (float)(chunk->highestBlock + 1), mn.z + (float)CHUNK_SIZE);
+
+            if (!aabbVisible(lightFrustum, mn, mx))
+                continue;
+
+            depthShader.setVec3(originLoc, mn);
+
+            //So o solido. Agua nao projeta sombra, e mandar ela aqui
+            //escureceria o proprio fundo do lago.
+            it->second.drawSolid();
+            shadowDraws++;
+        }
+    }
+
+    shadows.end(screenW, screenH);
+
+    glPolygonOffset(0.0f, 0.0f);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glDisable(GL_DEPTH_CLAMP);
+}
+
 void render(const Shader& shader, const Shader& lineShader, const Shader& skyShader,
     const Texture& texture, const World& world, const MeshMap& meshes,
     unsigned int wireVAO, unsigned int quadVAO, const RaycastHit& hit,
-    const SkyState& sky, float fogEnd, float aspect)
+    const SkyState& sky, float fogEnd, float aspect,
+    const ShadowMap& shadows, bool shadowsOn)
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -536,6 +611,39 @@ void render(const Shader& shader, const Shader& lineShader, const Shader& skySha
     shader.setFloat("fogStart", fogEnd * 0.55f);
     shader.setFloat("fogEnd", fogEnd);
     shader.setFloat("dayLight", sky.lightLevel);
+
+    //---- sombra ----
+    //Tudo aqui vai uma vez por frame, nao por draw: sao poucos uniforms e o
+    //custo some perto dos ~700 draws que vem depois.
+    if (shadowsOn)
+    {
+        shadows.bindTexture(1);
+
+        //Volta a unidade ativa pra 0, que e onde todo o resto do frame
+        //espera encontrar o atlas.
+        glActiveTexture(GL_TEXTURE0);
+
+        for (int c = 0; c < SHADOW_CASCADES; c++)
+        {
+            std::string i = std::to_string(c);
+            shader.setMat4("cascadeMatrix[" + i + "]", shadows.cascade(c).lightSpace);
+            shader.setFloat("cascadeSplit[" + i + "]", shadows.cascade(c).splitDepth);
+            shader.setFloat("cascadeTexel[" + i + "]", shadows.cascade(c).texelWorld);
+        }
+
+        shader.setVec3("sunDir", sky.sunDir);
+        shader.setFloat("shadowDistance", SHADOW_DISTANCE);
+
+        //A sombra e do SOL. Com ele abaixo do horizonte nao ha o que
+        //projetar, entao a forca vai a zero junto com a altura dele e o
+        //shader pula o calculo inteiro.
+        float sunUp = glm::smoothstep(0.0f, 0.25f, sky.sunHeight);
+        shader.setFloat("shadowStrength", SHADOW_STRENGTH * sunUp);
+    }
+    else
+    {
+        shader.setFloat("shadowStrength", 0.0f);
+    }
 
     //Consultado uma vez e reaproveitado nos ~700 draws do frame.
     int originLoc = shader.uniformLocation("chunkOrigin");
@@ -730,6 +838,15 @@ int main()
     Shader skyShader("shaders/sky.vert", "shaders/sky.frag");
     unsigned int quadVAO = createFullscreenQuad();
 
+    Shader depthShader("shaders/depth.vert", "shaders/depth.frag");
+    depthShader.use();
+    depthShader.setInt("blockTexture", 0);
+
+    ShadowMap shadows;
+    bool shadowsOk = shadows.create();
+    if (!shadowsOk)
+        std::cout << "aviso: sombras desligadas" << std::endl;
+
     //O fog termina um pouco antes da borda carregada, pra esconder o corte.
     const float FOG_END = (float)(RENDER_DISTANCE * CHUNK_SIZE) * 0.92f;
 
@@ -785,6 +902,8 @@ int main()
     //O sampler le da unidade 0. Precisa ser setado uma vez, com o shader ativo.
     basicShader.use();
     basicShader.setInt("blockTexture", 0);
+    //Atlas na unidade 0, mapas de sombra na 1.
+    basicShader.setInt("shadowMaps", 1);
 
     //Cores de tint vao uma vez so; o vertice carrega apenas o indice.
     for (int i = 0; i < TINT_COUNT; i++)
@@ -853,6 +972,7 @@ int main()
                 << " | vy " << (int)player.velocity.y
                 << " | chunk (" << center.x << ", " << center.z << ")"
                 << " | chunks " << drawnChunks << "/" << totalChunks
+                << " | sombra " << shadowDraws
                 << " | fila " << workers.pending()
                 << " | disco " << ChunkStorage::chunksLoaded() << "R/" << ChunkStorage::chunksSaved() << "W";
             if (hit.hit)
@@ -881,7 +1001,15 @@ int main()
         //   Com a janela minimizada a altura vira 0: nao da pra dividir e nao ha o que desenhar.
         if (fbHeight > 0)
         {
-            render(basicShader, lineShader, skyShader, atlas, world, meshes, wireVAO, quadVAO, hit, sky, FOG_END, (float)fbWidth / (float)fbHeight);
+            float aspect = (float)fbWidth / (float)fbHeight;
+
+            //As sombras vem ANTES do passe de cor: ele precisa dos mapas
+            //prontos pra consultar.
+            if (shadowsOk)
+                renderShadows(shadows, depthShader, atlas, world, meshes, sky,
+                    camera.getView(), aspect, fbWidth, fbHeight);
+
+            render(basicShader, lineShader, skyShader, atlas, world, meshes, wireVAO, quadVAO, hit, sky, FOG_END, aspect, shadows, shadowsOk);
 
             if (ui.ready())
                 drawUI(ui, atlas, player, world, workers, fbWidth, fbHeight, lastFps, dayTime, sky);
@@ -898,6 +1026,8 @@ int main()
 
     //Salva o que ainda esta carregado. O que ja saiu do raio foi gravado
     //na hora do descarregamento.
+    shadows.destroy();
+
     int salvos = world.saveAll();
     std::cout << "saindo | " << salvos << " chunks gravados agora, "
         << ChunkStorage::chunksSaved() << " no total desta sessao, "

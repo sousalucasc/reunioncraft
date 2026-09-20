@@ -10,6 +10,17 @@ out vec3 ourColor;
 out vec2 TexCoord;
 out vec2 TileBase;
 
+// Posicao no mundo e normal da face, pro calculo de sombra no fragment.
+// A normal e flat porque todo vertice de um quad de voxel tem a mesma: nao
+// ha o que interpolar, e interpolar custaria.
+out vec3 WorldPos;
+flat out vec3 Normal;
+
+// Profundidade ao longo do eixo da camera. E por ela que o fragment escolhe
+// a cascata, e tem que ser a distancia em -Z, nao a radial, porque foi assim
+// que as fatias do frustum foram cortadas no lado da CPU.
+out float ViewDepth;
+
 // Distancia ate a camera, usada pelo fog.
 out float FogDist;
 
@@ -27,6 +38,16 @@ uniform float dayLight;
 
 // Luz fixa por orientacao, na ordem do enum BlockFace.
 const float FACE_LIGHT[6] = float[6](0.80, 0.80, 0.60, 0.60, 1.00, 0.50);
+
+// Normal de cada face, na ordem do enum BlockFace (Block.h).
+const vec3 FACE_NORMAL[6] = vec3[6](
+    vec3( 0.0,  0.0,  1.0),   // frente +Z
+    vec3( 0.0,  0.0, -1.0),   // tras   -Z
+    vec3(-1.0,  0.0,  0.0),   // esquerda -X
+    vec3( 1.0,  0.0,  0.0),   // direita  +X
+    vec3( 0.0,  1.0,  0.0),   // cima   +Y
+    vec3( 0.0, -1.0,  0.0)    // baixo  -Y
+);
 
 // Quanto cada nivel de oclusao escurece. Nivel 3 e ceu aberto.
 const float AO_LEVEL[4] = float[4](0.50, 0.70, 0.85, 1.00);
@@ -50,9 +71,14 @@ void main()
     float rv = float((aData.y >> 13u) & 31u);
 
     vec3 localPos = vec3(float(x), float(y), float(z));
-    vec4 viewPos = view * vec4(chunkOrigin + localPos, 1.0);
+    vec3 worldPos = chunkOrigin + localPos;
+    vec4 viewPos = view * vec4(worldPos, 1.0);
 
     gl_Position = projection * viewPos;
+
+    WorldPos = worldPos;
+    Normal = FACE_NORMAL[face];
+    ViewDepth = -viewPos.z;
 
     // Em espaco de camera a distancia ate a origem JA e a distancia ate o
     // observador, entao nao precisa mandar a posicao da camera como uniform.
