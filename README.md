@@ -1,1 +1,1 @@
-small attempt at building a simple OpenGL 3.3 3D engine, moderately vibecoded.
+learned how to drawn a triangle with opengl and proceeded to clone minecraft with the help of A.I
