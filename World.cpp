@@ -1,5 +1,6 @@
 #include "World.h"
 #include "TerrainGenerator.h"
+#include "ChunkStorage.h"
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +66,51 @@ ChunkPos World::chunkAt(float wx, float wz)
     return ChunkPos{ floorDiv(bx, CHUNK_SIZE), floorDiv(bz, CHUNK_SIZE) };
 }
 
+void World::insertChunk(ChunkPos pos, std::unique_ptr<Chunk> chunk)
+{
+    chunks[pos] = std::move(chunk);
+
+    //Os vizinhos ja meshados emitiram uma parede virada pra ca, porque na
+    //hora deles este chunk ainda nao existia. Sem remeshar fica um muro.
+    markDirty(ChunkPos{ pos.x - 1, pos.z });
+    markDirty(ChunkPos{ pos.x + 1, pos.z });
+    markDirty(ChunkPos{ pos.x, pos.z - 1 });
+    markDirty(ChunkPos{ pos.x, pos.z + 1 });
+}
+
+int World::unloadFar(ChunkPos center, int renderDistance)
+{
+    //Margem de 2 chunks alem do raio de render. Sem essa folga, andar pra
+    //frente e pra tras na fronteira ficaria gerando e descartando sem parar.
+    int unloadDistance = renderDistance + 2;
+    int removed = 0;
+
+    for (ChunkMap::iterator it = chunks.begin(); it != chunks.end(); )
+    {
+        int dx = std::abs(it->first.x - center.x);
+        int dz = std::abs(it->first.z - center.z);
+
+        if (dx > unloadDistance || dz > unloadDistance)
+        {
+            //Salva antes de jogar fora, senao o que o jogador construiu
+            //some ao andar pra longe. Como isso roda na thread principal e
+            //antes do proximo dispatchJobs, o arquivo ja esta completo se
+            //algum worker for reler este mesmo chunk depois.
+            if (it->second->modified)
+                ChunkStorage::save(it->first, *it->second);
+
+            it = chunks.erase(it);
+            removed++;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    return removed;
+}
+
 int World::streamAround(ChunkPos center, int renderDistance, const TerrainGenerator& gen, int maxPerCall)
 {
     //Descarrega com uma margem de 2 chunks alem do raio de render.
@@ -121,6 +167,19 @@ int World::streamAround(ChunkPos center, int renderDistance, const TerrainGenera
     return generated;
 }
 
+int World::saveAll()
+{
+    int n = 0;
+
+    for (ChunkMap::const_iterator it = chunks.begin(); it != chunks.end(); ++it)
+    {
+        if (it->second->modified && ChunkStorage::save(it->first, *it->second))
+            n++;
+    }
+
+    return n;
+}
+
 Chunk* World::getChunk(ChunkPos pos) const
 {
     ChunkMap::const_iterator it = chunks.find(pos);
@@ -160,6 +219,9 @@ void World::setBlock(int wx, int wy, int wz, BlockID id)
     int lz = floorMod(wz, CHUNK_SIZE);
 
     chunk->setBlock(lx, wy, lz, id);
+
+    //A partir daqui este chunk deixa de ser reproduzivel pelo noise.
+    chunk->modified = true;
 
     //A face que o vizinho desenha depende deste bloco, entao ele tambem
     //precisa ser remeshado.

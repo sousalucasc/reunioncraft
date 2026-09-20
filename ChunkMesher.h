@@ -6,13 +6,61 @@
 #include <vector>
 #include <cstdint>
 
-//Um conjunto de vertices e indices. 8 floats por vertice:
-//3 de posicao, 3 de cor ja com luz e AA aplicados, 2 de uv.
+//Largura do instantaneo: o chunk mais 1 bloco de casca de cada lado.
+constexpr int SNAP_SIZE = CHUNK_SIZE + 2;
+
+//Copia dos blocos de que o mesher precisa: o chunk inteiro mais a casca de
+//1 bloco em X e Z, que e ate onde a checagem de vizinho e o AO alcancam.
+//
+//Existe pra que o meshing possa rodar em outra thread sem tocar no World.
+//A alternativa seria proteger o World com mutex, mas ai o worker seguraria
+//o mapa por quase um milissegundo a cada chunk, justamente enquanto a
+//thread principal quer inserir e remover chunks.
+struct ChunkSnapshot
+{
+    ChunkPos pos;
+    int highestBlock;
+
+    //Indexado por [lx + 1][y][lz + 1], com lx e lz de -1 a CHUNK_SIZE.
+    std::vector<uint8_t> blocks;
+
+    ChunkSnapshot() : highestBlock(-1) {}
+
+    BlockID get(int lx, int y, int lz) const
+    {
+        if (lx < -1 || lx > CHUNK_SIZE || lz < -1 || lz > CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT)
+            return BLOCK_AIR;
+
+        return (BlockID)blocks[(size_t)(lx + 1) + SNAP_SIZE * ((size_t)(lz + 1) + SNAP_SIZE * (size_t)y)];
+    }
+};
+
+//Monta o instantaneo a partir do World. Roda na thread principal, que e a
+//unica que mexe no World, entao nao precisa de sincronizacao.
+void captureSnapshot(const World& world, ChunkPos pos, ChunkSnapshot& out);
+
+//Um conjunto de vertices e indices.
+//
+//Cada vertice sao DOIS uint32 em vez de 8 floats: 8 bytes contra 32.
+//O shader desempacota e reconstrui posicao, uv e cor.
+//
+//  palavra 0:  bits  0-4   x local   (0..16)
+//              bits  5-13  y         (0..256)
+//              bits 14-18  z local   (0..16)
+//              bits 19-21  face      (0..5)
+//              bits 22-23  nivel de AO (0..3)
+//              bits 24-25  indice do tint
+//
+//  palavra 1:  bits  0-7   tile do atlas (0..255)
+//              bit   8     canto em U
+//              bit   9     canto em V
 struct MeshBuffer
 {
-    std::vector<float> vertices;
+    std::vector<uint32_t> vertices;
     std::vector<uint32_t> indices;
 
+    //2 uint32 por vertice.
+    int vertexCount() const { return (int)vertices.size() / 2; }
     int faceCount() const { return (int)indices.size() / 6; }
 
     void clear()
@@ -38,9 +86,10 @@ struct MeshData
 
 //Emite apenas as faces que dao pro ar ou pra um bloco transparente.
 //Face entre dois blocos solidos nao chega a existir.
-//Consulta o World, nao o Chunk: e isso que evita parede na costura entre chunks.
+//Le do instantaneo, que ja inclui a casca do vizinho: e isso que evita
+//parede na costura entre chunks.
 //As posicoes ja saem em coordenada de mundo, entao o model fica identidade.
-void buildChunkMesh(const World& world, ChunkPos pos, MeshData& out);
+void buildChunkMesh(const ChunkSnapshot& snap, MeshData& out);
 
 //Os buffers na GPU. Guarda dois conjuntos: um por passe.
 class ChunkMesh

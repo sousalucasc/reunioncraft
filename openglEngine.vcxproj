@@ -107,6 +107,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <LanguageStandard>stdcpp17</LanguageStandard>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
@@ -120,6 +121,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <LanguageStandard>stdcpp17</LanguageStandard>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
@@ -147,6 +149,10 @@
     <ClCompile Include="Raycast.cpp" />
     <ClCompile Include="Player.cpp" />
     <ClCompile Include="Frustum.cpp" />
+    <ClCompile Include="ChunkWorkers.cpp" />
+    <ClCompile Include="ChunkStorage.cpp" />
+    <ClCompile Include="UIRenderer.cpp" />
+    <ClCompile Include="Sky.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Shader.h" />
@@ -161,12 +167,20 @@
     <ClInclude Include="Raycast.h" />
     <ClInclude Include="Player.h" />
     <ClInclude Include="Frustum.h" />
+    <ClInclude Include="ChunkWorkers.h" />
+    <ClInclude Include="ChunkStorage.h" />
+    <ClInclude Include="UIRenderer.h" />
+    <ClInclude Include="Sky.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\basic.vert" />
     <None Include="shaders\basic.frag" />
     <None Include="shaders\line.vert" />
     <None Include="shaders\line.frag" />
+    <None Include="shaders\ui.vert" />
+    <None Include="shaders\ui.frag" />
+    <None Include="shaders\sky.vert" />
+    <None Include="shaders\sky.frag" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

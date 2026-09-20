@@ -4,6 +4,7 @@
 #include "Block.h"
 
 #include <cstdint>
+#include <vector>
 
 constexpr int CHUNK_SIZE = 16;
 constexpr int CHUNK_HEIGHT = 256;
@@ -15,6 +16,10 @@ class Chunk
 public:
     //Liga quando o conteudo muda: a mesh precisa ser regerada.
     bool dirty;
+
+    //Liga quando o jogador altera alguma coisa. Chunk nao modificado nao
+    //precisa ir pro disco: o gerador reproduz ele identico a partir da seed.
+    bool modified;
 
     //Y do bloco nao-ar mais alto, ou -1 se o chunk esta vazio.
     //O mesher para aqui em vez de varrer os 256 niveis: acima disso so tem ar.
@@ -30,6 +35,12 @@ public:
 
     //Chao plano de teste: bedrock, pedra, terra e uma camada de grama no topo.
     void fillFlat(int groundHeight);
+
+    //Serializacao com RLE: pares de (contagem uint16, bloco uint8).
+    //Terreno de voxel comprime muito bem assim, porque a coluna e feita de
+    //longas faixas do mesmo bloco.
+    void encodeRLE(std::vector<uint8_t>& out) const;
+    bool decodeRLE(const uint8_t* data, size_t size);
 
 private:
     //Layout x + CHUNK_SIZE * (z + CHUNK_SIZE * y): varrer em X e o mais rapido,

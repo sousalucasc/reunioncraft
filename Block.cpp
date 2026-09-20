@@ -10,7 +10,7 @@ static BlockInfo uniformBlock(int tile, bool solid = true, bool transparent = fa
     b.translucent = false;
     for (int i = 0; i < 6; i++)
         b.tiles[i] = tile;
-    b.tint = glm::vec3(1.0f);
+    b.tintIndex = TINT_NONE;
     b.tintTopOnly = false;
 
     return b;
@@ -31,7 +31,7 @@ static const BlockInfo* table()
         t[BLOCK_GRASS].tiles[FACE_BOTTOM] = TILE_DIRT;
         //O grass_top do Minecraft e cinza de proposito: o verde vem do bioma.
         //Aqui e fixo na cor de planicie (#91BD59). O grass_side ja vem colorido.
-        t[BLOCK_GRASS].tint = glm::vec3(0.569f, 0.741f, 0.349f);
+        t[BLOCK_GRASS].tintIndex = TINT_GRASS;
         t[BLOCK_GRASS].tintTopOnly = true;
 
         t[BLOCK_DIRT] = uniformBlock(TILE_DIRT);
@@ -57,7 +57,7 @@ static const BlockInfo* table()
         //entao o vizinho continua desenhando a face virada pra ca.
         t[BLOCK_LEAVES_OAK] = uniformBlock(TILE_LEAVES_OAK, true, true);
         //Assim como o grass_top, a folha vem cinza no pack e e tingida aqui.
-        t[BLOCK_LEAVES_OAK].tint = glm::vec3(0.290f, 0.592f, 0.204f);
+        t[BLOCK_LEAVES_OAK].tintIndex = TINT_LEAVES;
 
         t[BLOCK_SNOW] = uniformBlock(TILE_SNOW);
 
@@ -75,12 +75,22 @@ const BlockInfo& blockInfo(BlockID id)
     return table()[id];
 }
 
-glm::vec3 blockFaceTint(BlockID id, int face)
+glm::vec3 tintColor(int index)
+{
+    switch (index)
+    {
+    case TINT_GRASS:  return glm::vec3(0.569f, 0.741f, 0.349f);  // #91BD59, planicie
+    case TINT_LEAVES: return glm::vec3(0.290f, 0.592f, 0.204f);
+    default:          return glm::vec3(1.0f);
+    }
+}
+
+int blockFaceTintIndex(BlockID id, int face)
 {
     const BlockInfo& info = blockInfo(id);
 
     if (info.tintTopOnly && face != FACE_TOP)
-        return glm::vec3(1.0f);
+        return TINT_NONE;
 
-    return info.tint;
+    return info.tintIndex;
 }

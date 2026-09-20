@@ -365,3 +365,6 @@ FodyWeavers.xsd
 # Texturas derivadas do pack do Minecraft: nao redistribuir.
 # Gere as suas com tools/build_atlas.ps1
 textures/
+
+# Mundos salvos sao dados locais, nao codigo.
+saves/

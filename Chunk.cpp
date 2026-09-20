@@ -3,7 +3,7 @@
 #include <cstring>
 
 Chunk::Chunk()
-    : dirty(true), highestBlock(-1)
+    : dirty(true), modified(false), highestBlock(-1)
 {
     //BLOCK_AIR e 0, entao memset zera tudo pra ar.
     std::memset(blocks, BLOCK_AIR, sizeof(blocks));
@@ -70,4 +70,67 @@ void Chunk::fillFlat(int groundHeight)
         highestBlock = groundHeight - 1;
 
     dirty = true;
+}
+
+void Chunk::encodeRLE(std::vector<uint8_t>& out) const
+{
+    out.clear();
+    out.reserve(4096);
+
+    size_t i = 0;
+    while (i < CHUNK_VOLUME)
+    {
+        uint8_t value = blocks[i];
+
+        //A contagem cabe em 16 bits, entao quebra faixas muito longas.
+        size_t run = 1;
+        while (i + run < CHUNK_VOLUME && blocks[i + run] == value && run < 65535)
+            run++;
+
+        out.push_back((uint8_t)(run & 0xFF));
+        out.push_back((uint8_t)((run >> 8) & 0xFF));
+        out.push_back(value);
+
+        i += run;
+    }
+}
+
+bool Chunk::decodeRLE(const uint8_t* data, size_t size)
+{
+    size_t written = 0;
+    size_t i = 0;
+
+    highestBlock = -1;
+
+    while (i + 2 < size && written < CHUNK_VOLUME)
+    {
+        size_t run = (size_t)data[i] | ((size_t)data[i + 1] << 8);
+        uint8_t value = data[i + 2];
+        i += 3;
+
+        if (run == 0 || written + run > CHUNK_VOLUME)
+            return false;
+
+        for (size_t k = 0; k < run; k++)
+            blocks[written + k] = value;
+
+        if (value != BLOCK_AIR)
+        {
+            //Indice linear e x + 16*(z + 16*y), entao o y do ultimo bloco
+            //da faixa sai da divisao pelo tamanho de uma camada.
+            int lastY = (int)((written + run - 1) / (CHUNK_SIZE * CHUNK_SIZE));
+            if (lastY > highestBlock)
+                highestBlock = lastY;
+        }
+
+        written += run;
+    }
+
+    if (written != CHUNK_VOLUME)
+        return false;
+
+    dirty = true;
+    modified = true;
+
+    return true;
 }

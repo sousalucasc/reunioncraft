@@ -45,15 +45,28 @@ struct BlockInfo
     bool translucent;
     //Tile do atlas por face, na ordem do BlockFace.
     int tiles[6];
-    //Multiplica a textura. Branco = textura original.
-    glm::vec3 tint;
+    //Indice na tabela de tints. O shader recebe as cores como uniform,
+    //entao o vertice carrega 2 bits em vez de 3 floats.
+    int tintIndex;
     //true = so a face de cima recebe o tint (caso da grama).
     bool tintTopOnly;
 };
 
+//Cores de tint. A ordem e o indice guardado no vertice.
+enum TintIndex
+{
+    TINT_NONE = 0,
+    TINT_GRASS,
+    TINT_LEAVES,
+    TINT_COUNT
+};
+
 const BlockInfo& blockInfo(BlockID id);
 
-//Tint que a face recebe, ja resolvendo o tintTopOnly.
-glm::vec3 blockFaceTint(BlockID id, int face);
+//Cor de cada indice. Enviada ao shader como uniform, uma vez so.
+glm::vec3 tintColor(int index);
+
+//Indice do tint que a face recebe, ja resolvendo o tintTopOnly.
+int blockFaceTintIndex(BlockID id, int face);
 
 #endif

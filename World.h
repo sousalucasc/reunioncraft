@@ -45,6 +45,17 @@ public:
     //Mesma grade, mas com o relevo vindo do gerador de terreno.
     void generate(int chunksX, int chunksZ, const TerrainGenerator& gen);
 
+    //Insere um chunk ja pronto (vindo de um worker) e marca os vizinhos
+    //como dirty, porque a mesh deles foi feita quando este aqui nao existia.
+    void insertChunk(ChunkPos pos, std::unique_ptr<Chunk> chunk);
+
+    //Descarta o que passou de raio + 2, salvando antes o que foi modificado.
+    //Devolve quantos sairam.
+    int unloadFar(ChunkPos center, int renderDistance);
+
+    //Grava todos os chunks modificados. Chamado ao sair.
+    int saveAll();
+
     //Gera o que falta dentro do raio e descarta o que passou de raio + 2.
     //Gera no maximo maxPerCall chunks por chamada, pra nao travar o frame.
     //Devolve quantos gerou.

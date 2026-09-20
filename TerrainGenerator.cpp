@@ -218,5 +218,8 @@ void TerrainGenerator::generate(Chunk& chunk, int chunkX, int chunkZ) const
             placeTree(chunk, originX, originZ, originX + dx, originZ + dz);
     }
 
+    //Recem gerado ainda nao foi tocado pelo jogador, entao nao precisa
+    //ir pro disco. O setBlock la em cima marcou; desmarca aqui.
+    chunk.modified = false;
     chunk.dirty = true;
 }

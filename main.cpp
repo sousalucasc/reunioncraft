@@ -6,6 +6,9 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <unordered_set>
+#include <string>
+#include <cstdio>
 #include <cmath>
 
 #include "Shader.h"
@@ -19,6 +22,10 @@
 #include "Raycast.h"
 #include "Player.h"
 #include "Frustum.h"
+#include "ChunkWorkers.h"
+#include "ChunkStorage.h"
+#include "UIRenderer.h"
+#include "Sky.h"
 
 //Globais porque os callbacks do GLFW sao funcoes livres e nao carregam contexto.
 Camera camera(glm::vec3(64.0f, 70.0f, 170.0f));
@@ -27,10 +34,13 @@ float lastY = 360.0f;
 bool firstMouse = true;
 
 //Quantos chunks de raio ficam carregados em volta do jogador.
-const int RENDER_DISTANCE = 4;
-//Teto por frame pra geracao e pra remesh, pra nao engasgar ao andar.
-const int CHUNKS_PER_FRAME = 1;
-const int REMESH_PER_FRAME = 2;
+const int RENDER_DISTANCE = 24;
+//Teto por frame de trabalho DESPACHADO pros workers. Nao e mais o custo da
+//thread principal, so evita encher a fila sem necessidade.
+const int JOBS_PER_FRAME = 8;
+//Uploads pra GPU por frame. Esse sim e custo da thread principal: o contexto
+//OpenGL e dela, e cada upload e um glBufferData que pode travar o driver.
+const int UPLOADS_PER_FRAME = 4;
 //Alcance do raycast, em blocos.
 const float REACH = 6.0f;
 
@@ -57,6 +67,10 @@ int hotbarSlot = 0;
 bool leftWasDown = false;
 bool rightWasDown = false;
 bool flyKeyWasDown = false;
+bool timeKeyWasDown = false;
+
+//Hora do dia, de 0 a 1. Comeca de manha.
+float dayTime = 0.30f;
 
 //Estatistica do ultimo frame, so pra linha de status.
 int drawnChunks = 0;
@@ -102,6 +116,16 @@ void processInput(GLFWwindow* window, float deltaTime, const World& world, Playe
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
     }
     wireKeyWasDown = wireKeyDown;
+
+    //T adianta o relogio em 1/8 de dia, pra nao esperar o ciclo inteiro.
+    bool timeKeyDown = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
+    if (timeKeyDown && !timeKeyWasDown)
+    {
+        dayTime += 0.125f;
+        if (dayTime >= 1.0f)
+            dayTime -= 1.0f;
+    }
+    timeKeyWasDown = timeKeyDown;
 
     bool flyKeyDown = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
     if (flyKeyDown && !flyKeyWasDown)
@@ -274,12 +298,99 @@ GLFWwindow* initWindow(int width, int height, const char* title)
 
 typedef std::unordered_map<ChunkPos, ChunkMesh, ChunkPosHash> MeshMap;
 
-//Remesha apenas os chunks marcados como sujos.
-//O scratch e reaproveitado entre chamadas pra nao realocar os vetores toda vez.
-//Remesha apenas os chunks sujos, no maximo maxRemesh por chamada,
-//e joga fora as meshes dos chunks que o streaming ja descarregou.
-//Devolve quantos remeshou.
-int updateWorld(World& world, MeshMap& meshes, MeshData& scratch, int maxRemesh)
+//Conjuntos de trabalho em voo, pra nao submeter o mesmo chunk duas vezes.
+//Um unico trabalho por chunk tambem garante que os resultados nao possam
+//chegar fora de ordem e sobrescrever uma mesh mais nova com uma velha.
+typedef std::unordered_set<ChunkPos, ChunkPosHash> ChunkSet;
+
+//Recolhe o que os workers terminaram e devolve quantas meshes subiram pra GPU.
+int collectResults(World& world, MeshMap& meshes, ChunkWorkers& workers,
+    ChunkSet& genInFlight, ChunkSet& meshInFlight, int maxUploads)
+{
+    //Chunks gerados entram no mundo. Sem teto: inserir e barato, e um chunk
+    //que fica na fila e um buraco no mundo.
+    GenResult gen;
+    while (workers.popGenerated(gen))
+    {
+        genInFlight.erase(gen.pos);
+        world.insertChunk(gen.pos, std::move(gen.chunk));
+    }
+
+    //Meshes prontas sobem pra GPU, com teto.
+    int uploaded = 0;
+    MeshResult mesh;
+
+    while (uploaded < maxUploads && workers.popMesh(mesh))
+    {
+        meshInFlight.erase(mesh.pos);
+
+        //Pode ter sido descarregado enquanto o worker trabalhava.
+        if (world.getChunk(mesh.pos) == NULL)
+            continue;
+
+        meshes[mesh.pos].upload(mesh.data);
+        uploaded++;
+    }
+
+    return uploaded;
+}
+
+//Despacha geracao do que falta no raio e mesh dos chunks sujos.
+void dispatchJobs(World& world, ChunkWorkers& workers,
+    ChunkSet& genInFlight, ChunkSet& meshInFlight, ChunkPos center, int renderDistance, int maxJobs)
+{
+    int jobs = 0;
+
+    //Do anel mais proximo pro mais distante, pra que o perto apareca antes.
+    for (int r = 0; r <= renderDistance && jobs < maxJobs; r++)
+    {
+        for (int dz = -r; dz <= r && jobs < maxJobs; dz++)
+        {
+            for (int dx = -r; dx <= r && jobs < maxJobs; dx++)
+            {
+                if (std::max(std::abs(dx), std::abs(dz)) != r)
+                    continue;
+
+                ChunkPos pos{ center.x + dx, center.z + dz };
+
+                if (world.getChunk(pos) != NULL)
+                    continue;
+                if (genInFlight.count(pos) != 0)
+                    continue;
+
+                genInFlight.insert(pos);
+                workers.submitGenerate(pos);
+                jobs++;
+            }
+        }
+    }
+
+    //Mesh dos sujos. O instantaneo e tirado aqui, na thread principal, que e
+    //a unica que mexe no World. Dali pra frente o worker trabalha sozinho.
+    for (ChunkMap::const_iterator it = world.allChunks().begin();
+         it != world.allChunks().end() && jobs < maxJobs; ++it)
+    {
+        Chunk* chunk = it->second.get();
+        if (!chunk->dirty)
+            continue;
+
+        //Ja tem trabalho em voo pra este chunk: deixa sujo e tenta de novo
+        //quando o resultado chegar. Um trabalho por chunk de cada vez.
+        if (meshInFlight.count(it->first) != 0)
+            continue;
+
+        ChunkSnapshot snap;
+        captureSnapshot(world, it->first, snap);
+
+        chunk->dirty = false;
+        meshInFlight.insert(it->first);
+        workers.submitMesh(std::move(snap));
+        jobs++;
+    }
+}
+
+//Descarta meshes de chunks que sairam do raio.
+void evictMeshes(const World& world, MeshMap& meshes)
 {
     for (MeshMap::iterator it = meshes.begin(); it != meshes.end(); )
     {
@@ -293,27 +404,8 @@ int updateWorld(World& world, MeshMap& meshes, MeshData& scratch, int maxRemesh)
             ++it;
         }
     }
-
-    int done = 0;
-
-    for (ChunkMap::const_iterator it = world.allChunks().begin(); it != world.allChunks().end(); ++it)
-    {
-        if (done >= maxRemesh)
-            break;
-
-        Chunk* chunk = it->second.get();
-        if (!chunk->dirty)
-            continue;
-
-        buildChunkMesh(world, it->first, scratch);
-        meshes[it->first].upload(scratch);
-        chunk->dirty = false;
-
-        done++;
-    }
-
-    return done;
 }
+
 
 //12 arestas de um cubo centrado na origem, pra desenhar com GL_LINES.
 //Cada aresta sao 2 vertices, entao 24 no total.
@@ -345,6 +437,52 @@ unsigned int createWireCube()
     return VAO;
 }
 
+//Dois triangulos cobrindo a tela inteira, em NDC. Usado pelo ceu.
+unsigned int createFullscreenQuad()
+{
+    float v[] = {
+        -1.0f, -1.0f,   1.0f, -1.0f,   1.0f,  1.0f,
+        -1.0f, -1.0f,   1.0f,  1.0f,  -1.0f,  1.0f
+    };
+
+    unsigned int VAO, VBO;
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    glBindVertexArray(0);
+
+    return VAO;
+}
+
+//Gradiente do ceu, desenhado antes do mundo e sem escrever profundidade.
+void drawSky(const Shader& skyShader, unsigned int quadVAO, const SkyState& sky,
+    const glm::mat4& view, const glm::mat4& projection)
+{
+    //O ceu fica atras de tudo: nao testa nem escreve profundidade.
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+
+    skyShader.use();
+    skyShader.setMat4("invViewProjection", glm::inverse(projection * view));
+    skyShader.setVec3("cameraPos", camera.position);
+    skyShader.setVec3("skyZenith", sky.zenith);
+    skyShader.setVec3("skyHorizon", sky.horizon);
+
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+}
+
 //Contorno do bloco que a mira esta apontando.
 void drawSelection(const Shader& lineShader, unsigned int wireVAO, const RaycastHit& hit,
     const glm::mat4& view, const glm::mat4& projection)
@@ -369,20 +507,31 @@ void drawSelection(const Shader& lineShader, unsigned int wireVAO, const Raycast
 }
 
 //Desenha um frame.
-void render(const Shader& shader, const Shader& lineShader, const Texture& texture,
-    const World& world, const MeshMap& meshes, unsigned int wireVAO, const RaycastHit& hit, float aspect)
+void render(const Shader& shader, const Shader& lineShader, const Shader& skyShader,
+    const Texture& texture, const World& world, const MeshMap& meshes,
+    unsigned int wireVAO, unsigned int quadVAO, const RaycastHit& hit,
+    const SkyState& sky, float fogEnd, float aspect)
 {
-    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glm::mat4 view = camera.getView();
     glm::mat4 projection = camera.getProjection(aspect);
 
+    //O ceu cobre a tela inteira, entao vem primeiro e dispensa cor de limpeza.
+    drawSky(skyShader, quadVAO, sky, view, projection);
+
     shader.use();
     texture.bind(0);
 
-    //O chunk ja nasce em coordenada de mundo, entao model e identidade.
-    shader.setMat4("model", glm::mat4(1.0f));
+    //Fog na cor do horizonte: o terreno distante se dissolve no ceu em vez
+    //de terminar num corte reto no limite do render distance.
+    shader.setVec3("fogColor", sky.horizon);
+    shader.setFloat("fogStart", fogEnd * 0.55f);
+    shader.setFloat("fogEnd", fogEnd);
+    shader.setFloat("dayLight", sky.lightLevel);
+
+    //O vertice guarda so a posicao local do chunk; o deslocamento pro mundo
+    //vai como uniform, um por chunk, logo antes de cada draw call.
     shader.setMat4("view", view);
     shader.setMat4("projection", projection);
 
@@ -393,7 +542,9 @@ void render(const Shader& shader, const Shader& lineShader, const Texture& textu
     totalChunks = (int)meshes.size();
 
     //Agua fica pra depois, e precisa sair na ordem certa.
-    static std::vector<std::pair<float, const ChunkMesh*> > waterQueue;
+    struct WaterItem { float dist; const ChunkMesh* mesh; glm::vec3 origin;
+        bool operator<(const WaterItem& o) const { return dist < o.dist; } };
+    static std::vector<WaterItem> waterQueue;
     waterQueue.clear();
 
     //---- Passe 1: opaco e recorte ----
@@ -414,6 +565,7 @@ void render(const Shader& shader, const Shader& lineShader, const Texture& textu
         if (!aabbVisible(frustum, mn, mx))
             continue;
 
+        shader.setVec3("chunkOrigin", mn);
         it->second.drawSolid();
         drawnChunks++;
 
@@ -422,7 +574,11 @@ void render(const Shader& shader, const Shader& lineShader, const Texture& textu
             glm::vec3 center((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f);
             glm::vec3 d = center - camera.position;
 
-            waterQueue.push_back(std::make_pair(d.x * d.x + d.y * d.y + d.z * d.z, &it->second));
+            WaterItem item;
+            item.dist = d.x * d.x + d.y * d.y + d.z * d.z;
+            item.mesh = &it->second;
+            item.origin = mn;
+            waterQueue.push_back(item);
         }
     }
 
@@ -442,13 +598,111 @@ void render(const Shader& shader, const Shader& lineShader, const Texture& textu
         glDepthMask(GL_FALSE);
 
         for (size_t i = 0; i < waterQueue.size(); i++)
-            waterQueue[i].second->drawWater();
+        {
+            shader.setVec3("chunkOrigin", waterQueue[i].origin);
+            waterQueue[i].mesh->drawWater();
+        }
 
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
     }
 
     drawSelection(lineShader, wireVAO, hit, view, projection);
+}
+
+//Desenha mira, hotbar e texto de debug. Roda depois do mundo, com o teste
+//de profundidade desligado.
+void drawUI(UIRenderer& ui, const Texture& atlas, const Player& player,
+    const World& world, const ChunkWorkers& workers,
+    int screenW, int screenH, int fps, float dayTime, const SkyState& sky)
+{
+    ui.begin(screenW, screenH);
+
+    const glm::vec4 branco(1.0f, 1.0f, 1.0f, 1.0f);
+    const glm::vec4 fundo(0.0f, 0.0f, 0.0f, 0.45f);
+
+    //---- mira: duas barras cruzadas no centro ----
+    float cx = screenW * 0.5f;
+    float cy = screenH * 0.5f;
+    const float BRACO = 9.0f;
+    const float GROSSURA = 2.0f;
+
+    glm::vec4 corMira(1.0f, 1.0f, 1.0f, 0.75f);
+    ui.rect(cx - BRACO, cy - GROSSURA * 0.5f, BRACO * 2.0f, GROSSURA, corMira);
+    ui.rect(cx - GROSSURA * 0.5f, cy - BRACO, GROSSURA, BRACO * 2.0f, corMira);
+
+    //---- hotbar: 9 slots centralizados embaixo ----
+    const float SLOT = 50.0f;
+    const float PAD = 4.0f;
+    const float LARGURA = 9.0f * SLOT;
+
+    float hx = cx - LARGURA * 0.5f;
+    float hy = (float)screenH - SLOT - 12.0f;
+
+    ui.rect(hx - PAD, hy - PAD, LARGURA + PAD * 2.0f, SLOT + PAD * 2.0f, fundo);
+
+    for (int i = 0; i < 9; i++)
+    {
+        float sx = hx + i * SLOT;
+
+        //Slot escolhido ganha uma moldura clara.
+        if (i == hotbarSlot)
+        {
+            ui.rect(sx - 2.0f, hy - 2.0f, SLOT + 4.0f, SLOT + 4.0f, glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
+            ui.rect(sx + 1.0f, hy + 1.0f, SLOT - 2.0f, SLOT - 2.0f, glm::vec4(0.0f, 0.0f, 0.0f, 0.5f));
+        }
+
+        //Mostra a face lateral do bloco: e a que identifica melhor.
+        const BlockInfo& info = blockInfo(HOTBAR[i]);
+        glm::vec3 tint = tintColor(blockFaceTintIndex(HOTBAR[i], FACE_FRONT));
+
+        ui.tile(sx + 5.0f, hy + 5.0f, SLOT - 10.0f, info.tiles[FACE_FRONT],
+            glm::vec4(tint.r, tint.g, tint.b, 1.0f));
+
+        //Numero da tecla no canto do slot.
+        char num[2] = { (char)('1' + i), 0 };
+        ui.text(num, sx + 5.0f, hy + SLOT - 18.0f, 14.0f, glm::vec4(1.0f, 1.0f, 1.0f, 0.8f));
+    }
+
+    //---- texto de debug ----
+    const float T = 16.0f;
+    float ty = 8.0f;
+
+    char linha[160];
+
+    std::snprintf(linha, sizeof(linha), "fps %d   %s", fps,
+        player.flying ? "voando" : (player.onGround ? "no chao" : "no ar"));
+    ui.rect(6.0f, ty - 2.0f, ui.textWidth(linha, T) + 8.0f, T + 4.0f, fundo);
+    ui.text(linha, 10.0f, ty, T, branco);
+    ty += T + 6.0f;
+
+    std::snprintf(linha, sizeof(linha), "xyz %.1f %.1f %.1f",
+        player.position.x, player.position.y, player.position.z);
+    ui.rect(6.0f, ty - 2.0f, ui.textWidth(linha, T) + 8.0f, T + 4.0f, fundo);
+    ui.text(linha, 10.0f, ty, T, branco);
+    ty += T + 6.0f;
+
+    std::snprintf(linha, sizeof(linha), "chunks %d/%d  fila %d",
+        drawnChunks, totalChunks, workers.pending());
+    ui.rect(6.0f, ty - 2.0f, ui.textWidth(linha, T) + 8.0f, T + 4.0f, fundo);
+    ui.text(linha, 10.0f, ty, T, branco);
+    ty += T + 6.0f;
+
+    std::snprintf(linha, sizeof(linha), "bloco %d   disco %dR/%dW",
+        (int)HOTBAR[hotbarSlot], ChunkStorage::chunksLoaded(), ChunkStorage::chunksSaved());
+    ui.rect(6.0f, ty - 2.0f, ui.textWidth(linha, T) + 8.0f, T + 4.0f, fundo);
+    ui.text(linha, 10.0f, ty, T, branco);
+    ty += T + 6.0f;
+
+    //Hora no formato 24h, pra leitura rapida do ciclo.
+    int hora = (int)(dayTime * 24.0f);
+    int minuto = (int)((dayTime * 24.0f - hora) * 60.0f);
+    std::snprintf(linha, sizeof(linha), "%02d:%02d   luz %.2f   (T adianta)",
+        hora, minuto, sky.lightLevel);
+    ui.rect(6.0f, ty - 2.0f, ui.textWidth(linha, T) + 8.0f, T + 4.0f, fundo);
+    ui.text(linha, 10.0f, ty, T, branco);
+
+    ui.end(atlas);
 }
 
 int main()
@@ -463,32 +717,71 @@ int main()
 
     unsigned int wireVAO = createWireCube();
 
+    Shader skyShader("shaders/sky.vert", "shaders/sky.frag");
+    unsigned int quadVAO = createFullscreenQuad();
+
+    //O fog termina um pouco antes da borda carregada, pra esconder o corte.
+    const float FOG_END = (float)(RENDER_DISTANCE * CHUNK_SIZE) * 0.92f;
+
+    UIRenderer ui("shaders/ui.vert", "shaders/ui.frag", "textures/font.png");
+    if (!ui.ready())
+        std::cout << "aviso: UI indisponivel. Rode tools/build_font.ps1 pra gerar textures/font.png" << std::endl;
+
     TerrainGenerator terrain(1337);
     World world;
 
-    MeshData meshScratch;
+    ChunkStorage::setWorldPath("saves/world");
+
     MeshMap meshes;
+
+    //Deixa um nucleo livre pra thread principal.
+    int workerCount = (int)std::thread::hardware_concurrency() - 1;
+    if (workerCount < 1)
+        workerCount = 1;
+    if (workerCount > 8)
+        workerCount = 8;
+
+    ChunkWorkers workers(terrain, workerCount);
+    ChunkSet genInFlight;
+    ChunkSet meshInFlight;
 
     //Nasce em pe no terreno, nao no vazio.
     Player player(glm::vec3(8.5f, (float)terrain.heightAt(8, 8) + 1.0f, 8.5f));
     camera.position = player.eyePosition();
 
-    //Primeira carga sem limite, senao o jogador comecaria olhando pro nada.
-    //Do segundo frame em diante o limite por frame entra em acao.
+    //Primeira carga: espera terminar, senao o jogador comeca olhando pro nada.
+    //Aqui nao ha teto por frame; a partir do loop, ha.
     double fillStart = glfwGetTime();
     ChunkPos spawn = World::chunkAt(camera.position.x, camera.position.z);
-    world.streamAround(spawn, RENDER_DISTANCE, terrain, 100000);
-    updateWorld(world, meshes, meshScratch, 100000);
+
+    //Duas rodadas: a primeira gera os chunks, a segunda mesha o que nasceu.
+    for (int fase = 0; fase < 2; fase++)
+    {
+        do
+        {
+            dispatchJobs(world, workers, genInFlight, meshInFlight, spawn, RENDER_DISTANCE, 100000);
+            collectResults(world, meshes, workers, genInFlight, meshInFlight, 100000);
+        }
+        while (workers.pending() > 0 || !genInFlight.empty() || !meshInFlight.empty());
+    }
+
     double fillTime = glfwGetTime() - fillStart;
 
     std::cout << "carga inicial: " << world.chunkCount() << " chunks em "
         << (int)(fillTime * 1000.0) << " ms | raio " << RENDER_DISTANCE
         << " chunks (" << RENDER_DISTANCE * CHUNK_SIZE << " blocos)" << std::endl;
-    std::cout << "WASD anda, espaco pula, V alterna voo | esq quebra, dir coloca | 1-9 bloco | F wireframe" << std::endl;
+    std::cout << "WASD anda, espaco pula, V voo, T hora | esq quebra, dir coloca | 1-9 bloco | F wireframe" << std::endl;
 
     //O sampler le da unidade 0. Precisa ser setado uma vez, com o shader ativo.
     basicShader.use();
     basicShader.setInt("blockTexture", 0);
+
+    //Cores de tint vao uma vez so; o vertice carrega apenas o indice.
+    for (int i = 0; i < TINT_COUNT; i++)
+    {
+        std::string nome = "tints[" + std::to_string(i) + "]";
+        basicShader.setVec3(nome, tintColor(i));
+    }
 
     //Comeca do relogio atual, nao de zero: a carga inicial levou segundos,
     //e o primeiro deltaTime seria esse tempo todo de uma vez. Com uma tecla
@@ -496,6 +789,7 @@ int main()
     float lastFrame = (float)glfwGetTime();
     float statTimer = 0.0f;
     int frames = 0;
+    int lastFps = 0;
 
     //Cada volta desse loop e um frame. Roda ate o ESC ou o X da janela.
     while (!glfwWindowShouldClose(window))
@@ -507,16 +801,27 @@ int main()
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
+        //Relogio do mundo.
+        dayTime += deltaTime / DAY_LENGTH;
+        if (dayTime >= 1.0f)
+            dayTime -= 1.0f;
+
+        SkyState sky = skyAt(dayTime);
+
         //2. Le o teclado e move a camera.
         //   O mouse NAO passa por aqui: ele chega sozinho pelo mouse_callback,
         //   que quem dispara e o glfwPollEvents la no passo 9.
         processInput(window, deltaTime, world, player);
 
-        //3. Streaming: gera o que entrou no raio, descarta o que saiu,
-        //   e remesha os sujos. Tudo com teto por frame.
+        //3. Streaming. A thread principal so coordena: recolhe o que os
+        //   workers terminaram, descarta o que saiu do raio e despacha o que
+        //   falta. Gerar terreno e montar mesh acontecem nas outras threads.
         ChunkPos center = World::chunkAt(player.position.x, player.position.z);
-        world.streamAround(center, RENDER_DISTANCE, terrain, CHUNKS_PER_FRAME);
-        updateWorld(world, meshes, meshScratch, REMESH_PER_FRAME);
+
+        collectResults(world, meshes, workers, genInFlight, meshInFlight, UPLOADS_PER_FRAME);
+        world.unloadFar(center, RENDER_DISTANCE);
+        evictMeshes(world, meshes);
+        dispatchJobs(world, workers, genInFlight, meshInFlight, center, RENDER_DISTANCE, JOBS_PER_FRAME);
 
 
         //4. Raycast da camera pra frente, pra saber qual bloco esta na mira.
@@ -537,7 +842,9 @@ int main()
                 << (player.flying ? " | voando" : (player.onGround ? " | no chao" : " | no ar"))
                 << " | vy " << (int)player.velocity.y
                 << " | chunk (" << center.x << ", " << center.z << ")"
-                << " | chunks " << drawnChunks << "/" << totalChunks;
+                << " | chunks " << drawnChunks << "/" << totalChunks
+                << " | fila " << workers.pending()
+                << " | disco " << ChunkStorage::chunksLoaded() << "R/" << ChunkStorage::chunksSaved() << "W";
             if (hit.hit)
             {
                 std::cout << " | mira (" << hit.x << "," << hit.y << "," << hit.z
@@ -549,6 +856,7 @@ int main()
                 std::cout << " | mira: nada";
             }
             std::cout << std::endl;
+            lastFps = frames;
             statTimer = 0.0f;
             frames = 0;
         }
@@ -562,7 +870,12 @@ int main()
         //   manda as matrizes e desenha os chunks).
         //   Com a janela minimizada a altura vira 0: nao da pra dividir e nao ha o que desenhar.
         if (fbHeight > 0)
-            render(basicShader, lineShader, atlas, world, meshes, wireVAO, hit, (float)fbWidth / (float)fbHeight);
+        {
+            render(basicShader, lineShader, skyShader, atlas, world, meshes, wireVAO, quadVAO, hit, sky, FOG_END, (float)fbWidth / (float)fbHeight);
+
+            if (ui.ready())
+                drawUI(ui, atlas, player, world, workers, fbWidth, fbHeight, lastFps, dayTime, sky);
+        }
 
         //8. Troca o buffer de tras com o da frente. So agora o frame aparece na tela.
         glfwSwapBuffers(window);
@@ -572,6 +885,13 @@ int main()
         //   Sem isso a janela congela e o Windows marca como "nao responde".
         glfwPollEvents();
     }
+
+    //Salva o que ainda esta carregado. O que ja saiu do raio foi gravado
+    //na hora do descarregamento.
+    int salvos = world.saveAll();
+    std::cout << "saindo | " << salvos << " chunks gravados agora, "
+        << ChunkStorage::chunksSaved() << " no total desta sessao, "
+        << ChunkStorage::chunksLoaded() << " lidos do disco" << std::endl;
 
     glfwTerminate();
     return 0;

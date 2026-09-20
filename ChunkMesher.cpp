@@ -2,11 +2,11 @@
 #include "Texture.h"
 
 #include <glad/glad.h>
+#include <vector>
 
 //Cantos de cada face num cubo unitario (0..1), na ordem baixo-esquerda,
 //baixo-direita, cima-direita, cima-esquerda, vista DE FORA.
 //Essa ordem garante winding CCW, que e o que o GL_CULL_FACE espera.
-//Como o cubo vai de 0 a 1, basta somar (x, y, z) do bloco pra posicionar.
 static const float FACE_POS[6][4][3] = {
     // frente (+Z)
     { { 0, 0, 1 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 } },
@@ -32,195 +32,312 @@ static const int FACE_DIR[6][3] = {
     {  0, -1,  0 }   // fundo
 };
 
-//Luz fixa por orientacao, sem fonte de luz nenhuma. E o truque mais barato
-//que existe pra dar volume: sem isso as 6 faces saem com a mesma cor e o
-//mundo parece uma colagem chapada.
-static const float FACE_LIGHT[6] = {
-    0.80f,  // frente (+Z)
-    0.80f,  // tras   (-Z)
-    0.60f,  // esquerda (-X)
-    0.60f,  // direita  (+X)
-    1.00f,  // topo   (+Y), recebe o "ceu"
-    0.50f   // fundo  (-Y), o mais escuro
-};
-
 //Os dois eixos que percorrem a face, no plano dela. Precisam casar com a
 //ordem dos cantos do FACE_POS: o canto i fica em (U[i] * tu + V[i] * tv).
 static const int FACE_TU[6][3] = {
-    {  1, 0,  0 },  // frente
-    { -1, 0,  0 },  // tras
-    {  0, 0,  1 },  // esquerda
-    {  0, 0, -1 },  // direita
-    {  1, 0,  0 },  // topo
-    {  1, 0,  0 }   // fundo
+    {  1, 0,  0 }, { -1, 0,  0 }, {  0, 0,  1 },
+    {  0, 0, -1 }, {  1, 0,  0 }, {  1, 0,  0 }
 };
 static const int FACE_TV[6][3] = {
-    { 0,  1,  0 },  // frente
-    { 0,  1,  0 },  // tras
-    { 0,  1,  0 },  // esquerda
-    { 0,  1,  0 },  // direita
-    { 0,  0, -1 },  // topo
-    { 0,  0,  1 }   // fundo
+    { 0,  1,  0 }, { 0,  1,  0 }, { 0,  1,  0 },
+    { 0,  1,  0 }, { 0,  0, -1 }, { 0,  0,  1 }
 };
 
 //Sinal de cada canto nos eixos da face, na ordem BL, BR, TR, TL.
 static const int CORNER_U[4] = { -1, 1, 1, -1 };
 static const int CORNER_V[4] = { -1, -1, 1, 1 };
 
-//Quanto cada nivel de oclusao escurece o vertice. Nivel 3 e ceu aberto.
-static const float AO_LEVEL[4] = { 0.50f, 0.70f, 0.85f, 1.00f };
+//As mesmas tabelas acima, reduzidas a indice de eixo e sentido, pro greedy
+//varrer o plano da face. Indice de eixo: 0 = x, 1 = y, 2 = z.
+static const int SLICE_AXIS[6] = { 2, 2, 0, 0, 1, 1 };
+static const int U_AXIS[6] = { 0, 0, 2, 2, 0, 0 };
+static const int U_SIGN[6] = { 1, -1, 1, -1, 1, 1 };
+static const int V_AXIS[6] = { 1, 1, 1, 1, 2, 2 };
+static const int V_SIGN[6] = { 1, 1, 1, 1, -1, 1 };
 
-//Le um bloco preferindo o acesso direto ao array do proprio chunk.
-//So sai pro World quando a coordenada cai fora dele, o que so acontece na borda.
-static BlockID readBlock(const World& world, const Chunk* chunk,
-    int originX, int originZ, int wx, int wy, int wz)
+//A luz por face, a tabela de AO e as cores de tint vivem no
+//shaders/basic.vert: o vertice so carrega os indices.
+
+void captureSnapshot(const World& world, ChunkPos pos, ChunkSnapshot& out)
 {
-    int lx = wx - originX;
-    int lz = wz - originZ;
+    out.pos = pos;
+    out.blocks.assign((size_t)SNAP_SIZE * SNAP_SIZE * CHUNK_HEIGHT, (uint8_t)BLOCK_AIR);
 
-    if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE)
-        return chunk->getBlock(lx, wy, lz);
+    const Chunk* center = world.getChunk(pos);
+    out.highestBlock = (center != NULL) ? center->highestBlock : -1;
 
-    return world.getBlock(wx, wy, wz);
+    if (center == NULL)
+        return;
+
+    //Copia ate um nivel acima do topo: o mesher olha o vizinho de cima
+    //pra decidir se emite a face do topo.
+    int maxY = out.highestBlock + 1;
+    if (maxY >= CHUNK_HEIGHT)
+        maxY = CHUNK_HEIGHT - 1;
+
+    //Cache dos 9 chunks, pra nao repetir busca no mapa a cada coluna.
+    const Chunk* around[3][3];
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
+            around[dx + 1][dz + 1] = world.getChunk(ChunkPos{ pos.x + dx, pos.z + dz });
+
+    for (int lz = -1; lz <= CHUNK_SIZE; lz++)
+    {
+        for (int lx = -1; lx <= CHUNK_SIZE; lx++)
+        {
+            //Em qual dos 9 chunks esta coluna cai, e onde dentro dele.
+            int cx = (lx < 0) ? -1 : ((lx >= CHUNK_SIZE) ? 1 : 0);
+            int cz = (lz < 0) ? -1 : ((lz >= CHUNK_SIZE) ? 1 : 0);
+
+            const Chunk* src = around[cx + 1][cz + 1];
+            if (src == NULL)
+                continue;
+
+            int sx = lx - cx * CHUNK_SIZE;
+            int sz = lz - cz * CHUNK_SIZE;
+
+            for (int y = 0; y <= maxY; y++)
+            {
+                out.blocks[(size_t)(lx + 1) + SNAP_SIZE * ((size_t)(lz + 1) + SNAP_SIZE * (size_t)y)] =
+                    (uint8_t)src->getBlock(sx, y, sz);
+            }
+        }
+    }
 }
 
 //Bloco que tapa luz. Vidro e folha nao contam: da pra ver atraves.
-static bool occludes(const World& world, const Chunk* chunk,
-    int originX, int originZ, int wx, int wy, int wz)
+static bool occludes(const ChunkSnapshot& snap, int lx, int y, int lz)
 {
-    const BlockInfo& info = blockInfo(readBlock(world, chunk, originX, originZ, wx, wy, wz));
+    const BlockInfo& info = blockInfo(snap.get(lx, y, lz));
 
     return info.solid && !info.transparent;
 }
 
-void buildChunkMesh(const World& world, ChunkPos pos, MeshData& out)
+//Nivel de oclusao (0 a 3) de um canto da face. Os 3 vizinhos consultados
+//ficam na camada colada na face, por isso tudo parte de (nx, ny, nz).
+static int aoLevelAt(const ChunkSnapshot& snap, int nx, int ny, int nz, int face, int corner)
+{
+    int su = CORNER_U[corner];
+    int sv = CORNER_V[corner];
+
+    bool side1 = occludes(snap,
+        nx + FACE_TU[face][0] * su,
+        ny + FACE_TU[face][1] * su,
+        nz + FACE_TU[face][2] * su);
+
+    bool side2 = occludes(snap,
+        nx + FACE_TV[face][0] * sv,
+        ny + FACE_TV[face][1] * sv,
+        nz + FACE_TV[face][2] * sv);
+
+    //Dois lados fechados ja formam uma quina: nem adianta consultar o canto,
+    //a luz nao chega ali de jeito nenhum.
+    if (side1 && side2)
+        return 0;
+
+    bool corn = occludes(snap,
+        nx + FACE_TU[face][0] * su + FACE_TV[face][0] * sv,
+        ny + FACE_TU[face][1] * su + FACE_TV[face][1] * sv,
+        nz + FACE_TU[face][2] * su + FACE_TV[face][2] * sv);
+
+    return 3 - ((side1 ? 1 : 0) + (side2 ? 1 : 0) + (corn ? 1 : 0));
+}
+
+//Assinatura de uma face. Duas faces so podem ser fundidas se a assinatura
+//for igual, e ela inclui os 4 niveis de AO: fundir faces com AO diferente
+//apagaria o sombreado de quina.
+//Zero significa "nao ha face aqui".
+static uint32_t faceKey(const ChunkSnapshot& snap, int x, int y, int z, int face)
+{
+    BlockID id = snap.get(x, y, z);
+    if (id == BLOCK_AIR)
+        return 0;
+
+    const BlockInfo& info = blockInfo(id);
+
+    int nx = x + FACE_DIR[face][0];
+    int ny = y + FACE_DIR[face][1];
+    int nz = z + FACE_DIR[face][2];
+
+    BlockID neighborId = snap.get(nx, ny, nz);
+    const BlockInfo& neighbor = blockInfo(neighborId);
+
+    //Vizinho solido e opaco tampa esta face.
+    if (neighbor.solid && !neighbor.transparent)
+        return 0;
+
+    //Dois transparentes iguais nao precisam de face entre eles.
+    if (neighborId == id && neighbor.transparent)
+        return 0;
+
+    uint32_t key = 1u
+        | ((uint32_t)id << 1)
+        | ((uint32_t)info.tiles[face] << 9)
+        | ((uint32_t)blockFaceTintIndex(id, face) << 17);
+
+    for (int i = 0; i < 4; i++)
+        key |= (uint32_t)aoLevelAt(snap, nx, ny, nz, face, i) << (19 + i * 2);
+
+    return key;
+}
+
+//Converte (fatia, u, v) do plano da face pra coordenada local do chunk.
+static void cellToBlock(int face, int slice, int u, int v, int maxY, int& x, int& y, int& z)
+{
+    int coord[3] = { 0, 0, 0 };
+    int extent[3] = { CHUNK_SIZE, maxY, CHUNK_SIZE };
+
+    //O eixo da fatia anda sempre no sentido positivo; o sentido da face ja
+    //esta embutido no FACE_POS.
+    coord[SLICE_AXIS[face]] = slice;
+
+    //Eixo com sinal negativo percorre a fatia de tras pra frente.
+    int ua = U_AXIS[face];
+    coord[ua] = (U_SIGN[face] > 0) ? u : (extent[ua] - 1 - u);
+
+    int va = V_AXIS[face];
+    coord[va] = (V_SIGN[face] > 0) ? v : (extent[va] - 1 - v);
+
+    x = coord[0];
+    y = coord[1];
+    z = coord[2];
+}
+
+void buildChunkMesh(const ChunkSnapshot& snap, MeshData& out)
 {
     out.solid.clear();
     out.water.clear();
 
-    const Chunk* chunk = world.getChunk(pos);
-    if (chunk == NULL)
+    if (snap.highestBlock < 0)
         return;
 
-    //Canto do chunk em coordenada de mundo.
-    int originX = pos.x * CHUNK_SIZE;
-    int originZ = pos.z * CHUNK_SIZE;
+    int maxY = snap.highestBlock + 1;
+    int extent[3] = { CHUNK_SIZE, maxY, CHUNK_SIZE };
 
-    //Para no bloco mais alto do chunk em vez de varrer os 256 niveis.
-    for (int y = 0; y <= chunk->highestBlock; y++)
+    //thread_local porque varios workers meshando ao mesmo tempo nao podem
+    //dividir a mesma mascara.
+    static thread_local std::vector<uint32_t> mask;
+
+    for (int face = 0; face < 6; face++)
     {
-        for (int z = 0; z < CHUNK_SIZE; z++)
+        int sliceMax = extent[SLICE_AXIS[face]];
+        int uMax = extent[U_AXIS[face]];
+        int vMax = extent[V_AXIS[face]];
+
+        for (int slice = 0; slice < sliceMax; slice++)
         {
-            for (int x = 0; x < CHUNK_SIZE; x++)
+            //1) Monta a mascara desta fatia.
+            mask.assign((size_t)uMax * vMax, 0u);
+            bool anything = false;
+
+            for (int v = 0; v < vMax; v++)
             {
-                BlockID id = chunk->getBlock(x, y, z);
-                if (id == BLOCK_AIR)
-                    continue;
-
-                const BlockInfo& info = blockInfo(id);
-
-                int wx = originX + x;
-                int wz = originZ + z;
-
-                for (int face = 0; face < 6; face++)
+                for (int u = 0; u < uMax; u++)
                 {
-                    int nx = wx + FACE_DIR[face][0];
-                    int ny = y + FACE_DIR[face][1];
-                    int nz = wz + FACE_DIR[face][2];
+                    int x, y, z;
+                    cellToBlock(face, slice, u, v, maxY, x, y, z);
 
-                    //Consulta o mundo na borda: e isso que evita uma parede
-                    //a cada 16 blocos na costura entre chunks.
-                    BlockID neighborId = readBlock(world, chunk, originX, originZ, nx, ny, nz);
-                    const BlockInfo& neighbor = blockInfo(neighborId);
+                    uint32_t k = faceKey(snap, x, y, z, face);
+                    mask[(size_t)v * uMax + u] = k;
 
-                    //Vizinho solido e opaco tampa esta face: nem emite.
-                    if (neighbor.solid && !neighbor.transparent)
-                        continue;
+                    if (k != 0)
+                        anything = true;
+                }
+            }
 
-                    //Dois blocos transparentes iguais (agua com agua, vidro com
-                    //vidro) nao precisam de face entre eles: so viraria lixo dentro
-                    //do volume. Sem isso um lago vira milhares de faces invisiveis.
-                    if (neighborId == id && neighbor.transparent)
-                        continue;
+            if (!anything)
+                continue;
 
-                    glm::vec4 uv = atlasUV(info.tiles[face]);
-                    glm::vec3 tint = blockFaceTint(id, face);
-
-                    const float faceUV[4][2] = {
-                        { uv.x, uv.y },
-                        { uv.z, uv.y },
-                        { uv.z, uv.w },
-                        { uv.x, uv.w }
-                    };
-
-                    //Ambient occlusion por vertice: quanto mais bloco em volta
-                    //do canto, mais escuro. Os 3 vizinhos consultados ficam na
-                    //camada colada na face, por isso tudo parte de (nx, ny, nz).
-                    float ao[4];
-
-                    for (int i = 0; i < 4; i++)
+            //2) Varre a mascara juntando retangulos maximos de chave igual.
+            for (int v = 0; v < vMax; v++)
+            {
+                for (int u = 0; u < uMax; )
+                {
+                    uint32_t k = mask[(size_t)v * uMax + u];
+                    if (k == 0)
                     {
-                        int su = CORNER_U[i];
-                        int sv = CORNER_V[i];
-
-                        bool side1 = occludes(world, chunk, originX, originZ,
-                            nx + FACE_TU[face][0] * su,
-                            ny + FACE_TU[face][1] * su,
-                            nz + FACE_TU[face][2] * su);
-
-                        bool side2 = occludes(world, chunk, originX, originZ,
-                            nx + FACE_TV[face][0] * sv,
-                            ny + FACE_TV[face][1] * sv,
-                            nz + FACE_TV[face][2] * sv);
-
-                        int level;
-
-                        //Dois lados fechados ja formam uma quina: nem adianta
-                        //consultar o canto, a luz nao chega ali de jeito nenhum.
-                        if (side1 && side2)
-                        {
-                            level = 0;
-                        }
-                        else
-                        {
-                            bool corner = occludes(world, chunk, originX, originZ,
-                                nx + FACE_TU[face][0] * su + FACE_TV[face][0] * sv,
-                                ny + FACE_TU[face][1] * su + FACE_TV[face][1] * sv,
-                                nz + FACE_TU[face][2] * su + FACE_TV[face][2] * sv);
-
-                            level = 3 - ((side1 ? 1 : 0) + (side2 ? 1 : 0) + (corner ? 1 : 0));
-                        }
-
-                        ao[i] = AO_LEVEL[level];
+                        u++;
+                        continue;
                     }
 
-                    float light = FACE_LIGHT[face];
+                    //Estica pra direita enquanto a chave for a mesma.
+                    int w = 1;
+                    while (u + w < uMax && mask[(size_t)v * uMax + u + w] == k)
+                        w++;
 
-                    //Agua vai pro buffer do segundo passe; todo o resto,
-                    //inclusive vidro e folha, fica no primeiro.
-                    MeshBuffer& target = info.translucent ? out.water : out.solid;
+                    //Estica pra cima, mas so se a linha inteira casar.
+                    int h = 1;
+                    bool grow = true;
 
-                    uint32_t base = (uint32_t)(target.vertices.size() / 8);
+                    while (v + h < vMax && grow)
+                    {
+                        for (int i = 0; i < w; i++)
+                        {
+                            if (mask[(size_t)(v + h) * uMax + u + i] != k)
+                            {
+                                grow = false;
+                                break;
+                            }
+                        }
+
+                        if (grow)
+                            h++;
+                    }
+
+                    //3) Emite um unico quad pro retangulo inteiro.
+                    BlockID id = (BlockID)((k >> 1) & 255u);
+                    uint32_t tile = (k >> 9) & 255u;
+                    uint32_t tint = (k >> 17) & 3u;
+
+                    MeshBuffer& target = blockInfo(id).translucent ? out.water : out.solid;
+                    uint32_t base = (uint32_t)(target.vertices.size() / 2);
+
+                    //Cada canto vem da celula correspondente do retangulo:
+                    //BL da celula inicial, BR da ultima coluna, e assim por diante.
+                    const int cu[4] = { u, u + w - 1, u + w - 1, u };
+                    const int cv[4] = { v, v,         v + h - 1, v + h - 1 };
+
+                    //Coordenada de textura em unidades de tile. O shader aplica
+                    //fract, entao a textura se repete ao longo do quad fundido.
+                    const int repU[4] = { 0, w, w, 0 };
+                    const int repV[4] = { 0, 0, h, h };
 
                     for (int i = 0; i < 4; i++)
                     {
-                        float shade = light * ao[i];
+                        int bx, by, bz;
+                        cellToBlock(face, slice, cu[i], cv[i], maxY, bx, by, bz);
 
-                        target.vertices.push_back(FACE_POS[face][i][0] + (float)wx);
-                        target.vertices.push_back(FACE_POS[face][i][1] + (float)y);
-                        target.vertices.push_back(FACE_POS[face][i][2] + (float)wz);
-                        target.vertices.push_back(tint.r * shade);
-                        target.vertices.push_back(tint.g * shade);
-                        target.vertices.push_back(tint.b * shade);
-                        target.vertices.push_back(faceUV[i][0]);
-                        target.vertices.push_back(faceUV[i][1]);
+                        uint32_t lx = (uint32_t)(bx + (int)FACE_POS[face][i][0]);
+                        uint32_t ly = (uint32_t)(by + (int)FACE_POS[face][i][1]);
+                        uint32_t lz = (uint32_t)(bz + (int)FACE_POS[face][i][2]);
+
+                        uint32_t ao = (k >> (19 + i * 2)) & 3u;
+
+                        uint32_t w0 = lx
+                            | (ly << 5)
+                            | (lz << 14)
+                            | ((uint32_t)face << 19)
+                            | (ao << 22)
+                            | (tint << 24);
+
+                        uint32_t w1 = tile
+                            | ((uint32_t)repU[i] << 8)
+                            | ((uint32_t)repV[i] << 13);
+
+                        target.vertices.push_back(w0);
+                        target.vertices.push_back(w1);
                     }
 
                     //Um quad vira dois triangulos, e da pra cortar por duas
-                    //diagonais diferentes. Com AO a escolha importa: cortar pela
-                    //diagonal que liga os dois cantos mais escuros deixa um vinco
+                    //diagonais. Com AO a escolha importa: cortar pela diagonal
+                    //que liga os dois cantos mais escuros deixa um vinco
                     //visivel atravessando o bloco. Entao escolhe sempre a outra.
-                    if (ao[0] + ao[2] > ao[1] + ao[3])
+                    uint32_t a0 = (k >> 19) & 3u;
+                    uint32_t a1 = (k >> 21) & 3u;
+                    uint32_t a2 = (k >> 23) & 3u;
+                    uint32_t a3 = (k >> 25) & 3u;
+
+                    if (a0 + a2 > a1 + a3)
                     {
                         target.indices.push_back(base + 0);
                         target.indices.push_back(base + 1);
@@ -238,6 +355,15 @@ void buildChunkMesh(const World& world, ChunkPos pos, MeshData& out)
                         target.indices.push_back(base + 3);
                         target.indices.push_back(base + 0);
                     }
+
+                    //4) Apaga o retangulo da mascara pra nao emitir de novo.
+                    for (int dv = 0; dv < h; dv++)
+                    {
+                        for (int du = 0; du < w; du++)
+                            mask[(size_t)(v + dv) * uMax + u + du] = 0;
+                    }
+
+                    u += w;
                 }
             }
         }
@@ -266,18 +392,15 @@ void ChunkMesh::uploadBuffer(Buffers& b, const MeshBuffer& data)
 
     //GL_DYNAMIC_DRAW: o chunk vai ser remeshado quando um bloco mudar.
     glBindBuffer(GL_ARRAY_BUFFER, b.VBO);
-    glBufferData(GL_ARRAY_BUFFER, data.vertices.size() * sizeof(float), data.vertices.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, data.vertices.size() * sizeof(uint32_t), data.vertices.data(), GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b.EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, data.indices.size() * sizeof(uint32_t), data.indices.data(), GL_DYNAMIC_DRAW);
 
-    //Stride 8: 3 de posicao + 3 de cor + 2 de uv.
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    //Um atributo so, de 2 inteiros. Tem que ser AttribIPointer: o Pointer
+    //normal converteria os bits pra float e destruiria o empacotamento.
+    glVertexAttribIPointer(0, 2, GL_UNSIGNED_INT, 2 * sizeof(uint32_t), (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(2);
 
     glBindVertexArray(0);
 }
