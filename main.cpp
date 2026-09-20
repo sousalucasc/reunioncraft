@@ -44,6 +44,12 @@ const int UPLOADS_PER_FRAME = 4;
 //Alcance do raycast, em blocos.
 const float REACH = 6.0f;
 
+//Intervalo de troca de buffer: 0 nao espera o monitor, 1 espera um refresh,
+//2 espera dois (metade da taxa).
+//Com 1 o FPS fica preso na taxa do monitor e nao da pra medir o custo real
+//de nada. Com 0 aparece tearing, mas o numero passa a significar algo.
+const int VSYNC = 0;
+
 //Wireframe liga/desliga no F. Serve pra conferir que face interna nao existe.
 bool wireframe = false;
 bool wireKeyWasDown = false;
@@ -273,6 +279,7 @@ GLFWwindow* initWindow(int width, int height, const char* title)
         return NULL;
     }
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(VSYNC);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
